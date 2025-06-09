@@ -1,7 +1,7 @@
 from typing import TypedDict, List, Dict
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from context_manager import ContextManager
+from .context_manager import ContextManager
 import logging
 from langchain_core.prompts import SystemMessagePromptTemplate
 

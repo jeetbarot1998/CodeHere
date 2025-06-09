@@ -1,24 +1,23 @@
-from fastapi import FastAPI, Request, Header, Depends
-from pydantic import BaseModel
-from typing import List, Union, Optional, AsyncGenerator
+from fastapi import FastAPI, Request, Depends
+from typing import List, AsyncGenerator
 import time
 import logging
 from fastapi.responses import StreamingResponse
 import json
 import asyncio
-import os
+from langchain_ollama import OllamaLLM as Ollama
 from contextlib import asynccontextmanager
 
-# LangChain imports
-from langchain_ollama import OllamaLLM as Ollama
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-
 # Context management imports
-from context_manager import ContextManager
-from langgraph_workflow import ContextAwareWorkflow, ConversationState
+from bl.context_manager import ContextManager
+from bl.langgraph_workflow import ContextAwareWorkflow, ConversationState
 from dotenv import load_dotenv
+
+from src.helpers.api_utils import get_langchain_model, route_model_by_preference, convert_messages_to_langchain, \
+    MODEL_CONFIGS
+from src.helpers.dependency_injection import get_custom_headers
+from src.models.ChatRequest import ChatRequest
+from src.models.CustomHeaders import CustomHeaders
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,136 +51,6 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan
 )
-
-
-class TextContent(BaseModel):
-    type: str
-    text: str
-
-
-class Message(BaseModel):
-    role: str  # "user" or "assistant" or "system"
-    content: Union[str, List[TextContent]]
-
-
-class ChatRequest(BaseModel):
-    messages: List[Message]
-    model: str
-    temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 2048
-    stream: Optional[bool] = True
-
-
-class CustomHeaders(BaseModel):
-    user_id: Optional[str] = None
-    team_id: Optional[str] = None
-    session_id: Optional[str] = None
-    model_preference: Optional[str] = None
-    max_tokens: Optional[str] = None
-    enable_starring: Optional[str] = None
-    project_name: Optional[str] = None
-    environment: Optional[str] = None
-    priority: Optional[str] = None
-    use_case: Optional[str] = None
-
-
-# Model configuration (same as before)
-MODEL_CONFIGS = {
-    "gemma": {
-        "type": "ollama",
-        "model_name": "gemma3:4B",
-        "base_url": "http://localhost:11434"
-    },
-    "gpt-4": {
-        "type": "openai",
-        "model_name": "gpt-4",
-        "api_key": os.getenv("OPENAI_API_KEY")  # Set via environment variable
-    },
-    "claude": {
-        "type": "anthropic",
-        "model_name": "claude-3-sonnet-20240229",
-        "api_key": os.getenv("ANTHROPIC_API_KEY")  # Set via environment variable
-    }
-}
-
-
-
-def get_langchain_model(model_name: str, temperature: float = 0.7, max_tokens: int = 2048):
-    """Factory function to create LangChain model instances"""
-    config = MODEL_CONFIGS.get(model_name.lower())
-
-    if not config:
-        config = MODEL_CONFIGS["gemma"]
-
-    if config["type"] == "ollama":
-        return Ollama(
-            model=config["model_name"],
-            base_url=config.get("base_url", "http://localhost:11434"),
-            temperature=temperature
-        )
-    elif config["type"] == "openai":
-        return ChatOpenAI(
-            model=config["model_name"],
-            temperature=temperature,
-            max_tokens=max_tokens,
-            api_key=config.get("api_key")
-        )
-    elif config["type"] == "anthropic":
-        return ChatAnthropic(
-            model=config["model_name"],
-            temperature=temperature,
-            max_tokens=max_tokens,
-            api_key=config.get("api_key")
-        )
-    else:
-        raise ValueError(f"Unsupported model type: {config['type']}")
-
-
-def convert_messages_to_langchain(messages: List[Message]) -> List:
-    """Convert OpenAI format messages to LangChain format"""
-    langchain_messages = []
-
-    for message in messages:
-        content = extract_text_content(message.content)
-
-        if message.role == "user":
-            langchain_messages.append(HumanMessage(content=content))
-        elif message.role == "assistant":
-            langchain_messages.append(AIMessage(content=content))
-        elif message.role == "system":
-            langchain_messages.append(SystemMessage(content=content))
-
-    return langchain_messages
-
-
-def extract_text_content(content: Union[str, List[TextContent]]) -> str:
-    """Extract text from content"""
-    if isinstance(content, str):
-        return content
-    elif isinstance(content, list):
-        text_parts = []
-        for item in content:
-            if hasattr(item, 'text'):
-                text_parts.append(item.text)
-            elif isinstance(item, dict) and 'text' in item:
-                text_parts.append(item['text'])
-        return ' '.join(text_parts)
-    return str(content)
-
-
-def route_model_by_preference(headers: CustomHeaders, request_model: str) -> str:
-    """Route to appropriate model based on headers and request"""
-    if request_model and request_model.lower() in MODEL_CONFIGS:
-        return request_model.lower()
-
-    if headers.use_case == "quick_answers" or headers.priority == "fast":
-        return "gemma"
-    elif headers.model_preference == "anthropic":
-        return "claude"
-    elif headers.model_preference == "openai":
-        return "gpt-4"
-    else:
-        return "gemma"
 
 
 async def stream_langchain_response_with_context(
@@ -263,32 +132,6 @@ async def stream_langchain_response_with_context(
         yield f"data: {json.dumps(error_chunk)}\n\n"
 
 
-async def get_custom_headers(
-        x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-        x_team_id: Optional[str] = Header(None, alias="X-Team-ID"),
-        x_session_id: Optional[str] = Header(None, alias="X-Session-ID"),
-        x_model_preference: Optional[str] = Header(None, alias="X-Model-Preference"),
-        x_max_tokens: Optional[str] = Header(None, alias="X-Max-Tokens"),
-        x_enable_starring: Optional[str] = Header(None, alias="X-Enable-Starring"),
-        x_project_name: Optional[str] = Header(None, alias="X-Project-Name"),
-        x_environment: Optional[str] = Header(None, alias="X-Environment"),
-        x_priority: Optional[str] = Header(None, alias="X-Priority"),
-        x_use_case: Optional[str] = Header(None, alias="X-Use-Case")
-) -> CustomHeaders:
-    return CustomHeaders(
-        user_id=x_user_id,
-        team_id=x_team_id,
-        session_id=x_session_id,
-        model_preference=x_model_preference,
-        max_tokens=x_max_tokens,
-        enable_starring=x_enable_starring,
-        project_name=x_project_name,
-        environment=x_environment,
-        priority=x_priority,
-        use_case=x_use_case
-    )
-
-
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info(f"🔥 REQUEST: {request.method} {request.url.path}")
@@ -338,7 +181,7 @@ async def chat_completions(
         logger.info("   🧠 Processing with context awareness")
 
         # Run the workflow to get context-enhanced messages
-        workflow_state : ConversationState = await context_workflow.process(
+        workflow_state: ConversationState = await context_workflow.process(
             messages=langchain_messages,
             project_name=project_name,
             user_id=user_id,
@@ -346,7 +189,7 @@ async def chat_completions(
         )
 
         # Use the context-enhanced messages
-        langchain_messages :List = workflow_state["messages"]
+        langchain_messages:List = workflow_state["messages"]
 
         logger.info(f"   📚 Context injected: {workflow_state['context_used']}")
 
