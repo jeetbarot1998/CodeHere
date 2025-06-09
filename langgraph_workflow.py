@@ -1,8 +1,9 @@
-from typing import TypedDict, List, Optional, Annotated
+from typing import TypedDict, List, Dict
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from context_manager import ContextManager
 import logging
+from langchain_core.prompts import SystemMessagePromptTemplate
 
 logger = logging.getLogger(__name__)
 
@@ -80,51 +81,75 @@ class ContextAwareWorkflow:
         return state
 
     async def prepare_prompt(self, state: ConversationState) -> ConversationState:
-        """Inject context into the conversation"""
+        """Inject context into the conversation using LangChain templates"""
 
-        # Build context prompt
-        context_parts = []
+        # Define the context template
+        context_template = SystemMessagePromptTemplate.from_template(
+            """You are part of an AI development team assistant. 
+            You have access to previous conversations from this project that might be relevant.
+        
+            Project: {project_name}
+            ==================================================
+        
+            {similar_contexts}
+            {recent_history}
+        
+            Please consider this context when answering, but only reference it if directly relevant.
+            Maintain consistency with previous answers when applicable."""
+        )
 
-        # Add project context header
-        context_parts.append(f"Project: {state['project_name']}")
-        context_parts.append("=" * 50)
+        # Build similar contexts section
+        similar_contexts_text = self._format_similar_contexts(state["similar_contexts"])
 
-        # Add similar contexts if found
-        if state["similar_contexts"]:
-            context_parts.append("\n### Similar Previous Conversations in this Project:")
-            for i, ctx in enumerate(state["similar_contexts"], 1):
-                context_parts.append(f"\n**Example {i}** (relevance: {ctx['score']:.2f}):")
-                context_parts.append(f"Q: {ctx['question']}")
-                context_parts.append(f"A: {ctx['answer']}")
+        # Build recent history section
+        recent_history_text = self._format_recent_history(state["recent_messages"])
 
-        # Add recent conversation history
-        if state["recent_messages"]:
-            context_parts.append("\n### Recent Conversation History:")
-            for msg in state["recent_messages"]:
-                role = "User" if msg["role"] == "user" else "Assistant"
-                context_parts.append(f"{role}: {msg['content']}")
+        # Only inject context if we have meaningful content
+        if similar_contexts_text or recent_history_text:
+            # Format the system message using the template
+            system_message = context_template.format(
+                project_name=state["project_name"],
+                similar_contexts=similar_contexts_text,
+                recent_history=recent_history_text
+            )
 
-        # Create system message with context
-        context_prompt = "\n".join(context_parts)
-
-        # Inject context as a system message at the beginning
-        if context_parts and len(context_parts) > 2:  # More than just header
-            system_msg = SystemMessage(content=f"""You are part of an AI development team assistant. 
-You have access to previous conversations from this project that might be relevant.
-
-{context_prompt}
-
-Please consider this context when answering, but only reference it if directly relevant.
-Maintain consistency with previous answers when applicable.""")
-
-            # Insert system message at the beginning if not already present
-            if not state["messages"] or state["messages"][0].role != "system":
-                state["messages"].insert(0, system_msg)
+            # Insert or update system message
+            if not state["messages"] or not isinstance(state["messages"][0], SystemMessage):
+                state["messages"].insert(0, system_message)
             else:
-                # Update existing system message
-                state["messages"][0].content += f"\n\n{context_prompt}"
+                # Append to existing system message
+                state["messages"][0].content += f"\n\n{system_message.content}"
 
         return state
+
+    def _format_similar_contexts(self, similar_contexts: List[Dict]) -> str:
+        """Format similar contexts into readable text"""
+        if not similar_contexts:
+            return ""
+
+        lines = ["### Similar Previous Conversations in this Project:"]
+
+        for i, ctx in enumerate(similar_contexts, 1):
+            lines.extend([
+                f"\n**Example {i}** (relevance: {ctx['score']:.2f}):",
+                f"Q: {ctx['question']}",
+                f"A: {ctx['answer']}"
+            ])
+
+        return "\n".join(lines)
+
+    def _format_recent_history(self, recent_messages: List[Dict]) -> str:
+        """Format recent conversation history into readable text"""
+        if not recent_messages:
+            return ""
+
+        lines = ["\n### Recent Conversation History:"]
+
+        for msg in recent_messages:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            lines.append(f"{role}: {msg['content']}")
+
+        return "\n".join(lines)
 
     async def generate_response(self, state: ConversationState) -> ConversationState:
         """Generate response (placeholder - will be handled by main app)"""

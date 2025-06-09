@@ -127,7 +127,19 @@ class ContextManager:
                                      query: str,
                                      project_name: str,
                                      limit: int = 3) -> List[Dict]:
-        """Search for similar messages within a project"""
+        """
+            When we search for "What is singleton pattern?", Qdrant might return:
+
+            An answer about singleton (without its question)
+            A similar question (without its answer)
+            Random matches from the middle of conversations
+
+
+            We need complete Q&A pairs for context, so the code:
+
+            If it finds an answer → looks up its question in PostgreSQL or Qdrant
+            If it finds a question → looks up its answer in PostgreSQL or Qdrant
+        """
 
         # Generate embedding for query
         query_embedding = await asyncio.to_thread(
@@ -146,57 +158,79 @@ class ContextManager:
                     )
                 ]
             ),
-            limit=limit * 2  # Get more to ensure we have enough Q&A pairs
+            limit=limit * 2,  # Get more to ensure we have enough Q&A pairs
+            score_threshold=0.7  # Optional: can remove this
         )
 
         # Group by parent-child relationships
         context_items = []
-        seen_parents = set()
+        seen_pairs = set()
 
         for hit in search_result:
             payload = hit.payload
 
-            # If this is an answer, get its question
+            # If this is an answer, get its question from Qdrant
             if payload["role"] == "assistant" and payload.get("parent_message_id"):
-                parent_id = payload["parent_message_id"]
-                if parent_id not in seen_parents:
-                    seen_parents.add(parent_id)
-                    # Fetch the parent question from PostgreSQL
-                    async with self.pool.acquire() as conn:
-                        parent = await conn.fetchrow("""
-                            SELECT content FROM messages 
-                            WHERE id = $1::uuid
-                        """, uuid.UUID(parent_id))
+                pair_id = payload["parent_message_id"]
 
-                    if parent:
+                if pair_id not in seen_pairs:
+                    seen_pairs.add(pair_id)
+
+                    # Retrieve the parent question directly from Qdrant
+                    parent_results = self.qdrant_client.retrieve(
+                        collection_name=self.collection_name,
+                        ids=[payload["parent_message_id"]]
+                    )
+
+                    if parent_results:
+                        parent_payload = parent_results[0].payload
                         context_items.append({
-                            "question": parent["content"],
+                            "question": parent_payload["content"],
                             "answer": payload["content"],
                             "score": hit.score
                         })
 
-            # If this is a question, get its answer
+            # If this is a question, find its answer in Qdrant
             elif payload["role"] == "user":
-                async with self.pool.acquire() as conn:
-                    child = await conn.fetchrow("""
-                        SELECT content FROM messages 
-                        WHERE parent_message_id = $1::uuid
-                        AND role = 'assistant'
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    """, uuid.UUID(payload["message_id"]))
+                message_id = payload["message_id"]
 
-                if child and payload["message_id"] not in seen_parents:
-                    seen_parents.add(payload["message_id"])
-                    context_items.append({
-                        "question": payload["content"],
-                        "answer": child["content"],
-                        "score": hit.score
-                    })
+                if message_id not in seen_pairs:
+                    # Use scroll to find messages with exact parent_message_id match
+                    answer_results, _ = self.qdrant_client.scroll(
+                        collection_name=self.collection_name,
+                        scroll_filter=Filter(
+                            must=[
+                                FieldCondition(
+                                    key="parent_message_id",
+                                    match=MatchValue(value=message_id)
+                                ),
+                                FieldCondition(
+                                    key="project_name",
+                                    match=MatchValue(value=project_name)
+                                ),
+                                FieldCondition(
+                                    key="role",
+                                    match=MatchValue(value="assistant")
+                                )
+                            ]
+                        ),
+                        limit=1,
+                        with_payload=True
+                    )
+
+                    if answer_results:
+                        seen_pairs.add(message_id)
+                        context_items.append({
+                            "question": payload["content"],
+                            "answer": answer_results[0].payload["content"],
+                            "score": hit.score
+                        })
 
             if len(context_items) >= limit:
                 break
 
+        # Sort by score and return top results
+        context_items.sort(key=lambda x: x["score"], reverse=True)
         return context_items[:limit]
 
     async def get_recent_messages(self,

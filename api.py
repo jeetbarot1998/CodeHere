@@ -17,7 +17,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 # Context management imports
 from context_manager import ContextManager
-from langgraph_workflow import ContextAwareWorkflow
+from langgraph_workflow import ContextAwareWorkflow, ConversationState
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Global context manager and workflow
 context_manager = None
-context_workflow = None
+context_workflow : ContextAwareWorkflow = None
 
 load_dotenv()
 
@@ -196,6 +196,7 @@ async def stream_langchain_response_with_context(
 
         # For Ollama models
         if isinstance(model, Ollama):
+            # Thread pool for non-blocking FASTAPI native
             response = await asyncio.to_thread(
                 lambda: model.invoke(messages)
             )
@@ -330,13 +331,14 @@ async def chat_completions(
 
     # Convert messages to LangChain format
     langchain_messages = convert_messages_to_langchain(request.messages)
+    workflow_state = None
 
     # Process through context workflow
     if context_workflow:
         logger.info("   🧠 Processing with context awareness")
 
         # Run the workflow to get context-enhanced messages
-        workflow_state = await context_workflow.process(
+        workflow_state : ConversationState = await context_workflow.process(
             messages=langchain_messages,
             project_name=project_name,
             user_id=user_id,
@@ -344,7 +346,7 @@ async def chat_completions(
         )
 
         # Use the context-enhanced messages
-        langchain_messages = workflow_state["messages"]
+        langchain_messages :List = workflow_state["messages"]
 
         logger.info(f"   📚 Context injected: {workflow_state['context_used']}")
 
