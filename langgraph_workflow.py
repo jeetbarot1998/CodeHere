@@ -53,7 +53,7 @@ class ContextAwareWorkflow:
         # Extract the current query from messages
         current_query = ""
         for msg in reversed(state["messages"]):
-            if msg.role == "user":
+            if isinstance(msg, HumanMessage):
                 current_query = msg.content if isinstance(msg.content, str) else str(msg.content)
                 break
 
@@ -138,7 +138,7 @@ Maintain consistency with previous answers when applicable.""")
         # Extract the user's question
         user_message = None
         for msg in reversed(state["messages"]):
-            if msg.role == "user":
+            if isinstance(msg, HumanMessage):
                 user_message = msg.content if isinstance(msg.content, str) else str(msg.content)
                 break
 

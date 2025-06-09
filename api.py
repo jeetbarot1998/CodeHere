@@ -6,19 +6,52 @@ import logging
 from fastapi.responses import StreamingResponse
 import json
 import asyncio
-from datetime import datetime
+import os
+from contextlib import asynccontextmanager
 
 # LangChain imports
-from langchain_community.llms import Ollama
+from langchain_ollama import OllamaLLM as Ollama
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
+# Context management imports
+from context_manager import ContextManager
+from langgraph_workflow import ContextAwareWorkflow
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="LangChain AI Proxy Server", version="1.0.0")
+# Global context manager and workflow
+context_manager = None
+context_workflow = None
+
+load_dotenv()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize and cleanup context manager"""
+    global context_manager, context_workflow
+
+    # Startup
+    context_manager = ContextManager()
+    await context_manager.init_postgres()
+    context_workflow = ContextAwareWorkflow(context_manager)
+    logger.info("✅ Context manager initialized")
+
+    yield
+
+    # Shutdown
+    await context_manager.close()
+    logger.info("👋 Context manager closed")
+
+
+app = FastAPI(
+    title="LangChain AI Proxy Server with Context",
+    version="2.0.0",
+    lifespan=lifespan
+)
 
 
 class TextContent(BaseModel):
@@ -52,21 +85,7 @@ class CustomHeaders(BaseModel):
     use_case: Optional[str] = None
 
 
-class ResponseData(BaseModel):
-    """Model for saving responses to database"""
-    user_id: str
-    team_id: str
-    session_id: str
-    project_name: str
-    model_used: str
-    messages: List[Message]
-    response: str
-    timestamp: datetime
-    starred: bool = False
-    metadata: dict = {}
-
-
-# Model configuration
+# Model configuration (same as before)
 MODEL_CONFIGS = {
     "gemma": {
         "type": "ollama",
@@ -76,14 +95,15 @@ MODEL_CONFIGS = {
     "gpt-4": {
         "type": "openai",
         "model_name": "gpt-4",
-        "api_key": "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"  # Set via environment variable
+        "api_key": os.getenv("OPENAI_API_KEY")  # Set via environment variable
     },
     "claude": {
         "type": "anthropic",
         "model_name": "claude-3-sonnet-20240229",
-        "api_key": "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"  # Set via environment variable
+        "api_key": os.getenv("ANTHROPIC_API_KEY")  # Set via environment variable
     }
 }
+
 
 
 def get_langchain_model(model_name: str, temperature: float = 0.7, max_tokens: int = 2048):
@@ -91,7 +111,6 @@ def get_langchain_model(model_name: str, temperature: float = 0.7, max_tokens: i
     config = MODEL_CONFIGS.get(model_name.lower())
 
     if not config:
-        # Default to Gemma for unknown models
         config = MODEL_CONFIGS["gemma"]
 
     if config["type"] == "ollama":
@@ -105,14 +124,14 @@ def get_langchain_model(model_name: str, temperature: float = 0.7, max_tokens: i
             model=config["model_name"],
             temperature=temperature,
             max_tokens=max_tokens,
-            api_key=config.get("api_key")  # Should be set via environment
+            api_key=config.get("api_key")
         )
     elif config["type"] == "anthropic":
         return ChatAnthropic(
             model=config["model_name"],
             temperature=temperature,
             max_tokens=max_tokens,
-            api_key=config.get("api_key")  # Should be set via environment
+            api_key=config.get("api_key")
         )
     else:
         raise ValueError(f"Unsupported model type: {config['type']}")
@@ -136,7 +155,7 @@ def convert_messages_to_langchain(messages: List[Message]) -> List:
 
 
 def extract_text_content(content: Union[str, List[TextContent]]) -> str:
-    """Extract text from content (same as before)"""
+    """Extract text from content"""
     if isinstance(content, str):
         return content
     elif isinstance(content, list):
@@ -150,54 +169,38 @@ def extract_text_content(content: Union[str, List[TextContent]]) -> str:
     return str(content)
 
 
-async def save_response_to_db(response_data: ResponseData):
-    """Save response to database (placeholder for now)"""
-    # TODO: Implement actual database saving
-    logger.info(f"💾 Saving response to DB: {response_data.session_id}")
-    logger.info(f"   Model: {response_data.model_used}")
-    logger.info(f"   Response length: {len(response_data.response)} chars")
-
-    # For now, just log. Later integrate with your DB
-    pass
-
-
 def route_model_by_preference(headers: CustomHeaders, request_model: str) -> str:
     """Route to appropriate model based on headers and request"""
-    # Priority order: explicit model request > use case > preference > default
-
     if request_model and request_model.lower() in MODEL_CONFIGS:
         return request_model.lower()
 
     if headers.use_case == "quick_answers" or headers.priority == "fast":
-        return "gemma"  # Fast local model
+        return "gemma"
     elif headers.model_preference == "anthropic":
         return "claude"
     elif headers.model_preference == "openai":
         return "gpt-4"
     else:
-        return "gemma"  # Default to local model
+        return "gemma"
 
 
-async def stream_langchain_response(
+async def stream_langchain_response_with_context(
         model,
         messages: List,
         model_name: str,
-        response_data: ResponseData
+        workflow_state: dict
 ) -> AsyncGenerator[str, None]:
-    """Stream response from LangChain model"""
+    """Stream response from LangChain model with context"""
     try:
+        full_response = ""
 
-        # For Ollama models (like Gemma), use invoke with streaming
+        # For Ollama models
         if isinstance(model, Ollama):
-            # Ollama doesn't support streaming callbacks in the same way
-            # So we'll get the full response and simulate streaming
             response = await asyncio.to_thread(
                 lambda: model.invoke(messages)
             )
 
-            # Simulate streaming by yielding chunks
             words = response.split()
-            full_response = ""
 
             for i, word in enumerate(words):
                 chunk_content = word + " " if i < len(words) - 1 else word
@@ -208,45 +211,35 @@ async def stream_langchain_response(
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
                     "model": model_name,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "role": "assistant",
-                                "content": chunk_content
-                            },
-                            "logprobs": None,
-                            "finish_reason": None
-                        }
-                    ]
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": chunk_content},
+                        "finish_reason": None
+                    }]
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
-
-            # Save the complete response
-            response_data.response = full_response.strip()
-            await save_response_to_db(response_data)
 
         else:
             # For OpenAI/Anthropic models with proper streaming
             async for chunk in model.astream(messages):
+                full_response += chunk.content
                 chunk_data = {
                     "id": f"chatcmpl-{int(time.time())}",
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
                     "model": model_name,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "role": "assistant",
-                                "content": chunk.content
-                            },
-                            "logprobs": None,
-                            "finish_reason": None
-                        }
-                    ]
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": chunk.content},
+                        "finish_reason": None
+                    }]
                 }
                 yield f"data: {json.dumps(chunk_data)}\n\n"
+
+        # Save the complete response to context
+        if context_workflow and workflow_state:
+            workflow_state["final_response"] = full_response.strip()
+            await context_workflow.save_interaction(workflow_state)
 
         # Final chunk
         final_chunk = {
@@ -254,72 +247,19 @@ async def stream_langchain_response(
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model_name,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "logprobs": None,
-                    "finish_reason": "stop"
-                }
-            ]
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
         }
         yield f"data: {json.dumps(final_chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
     except Exception as e:
         logger.error(f"Error in streaming: {e}")
-        error_chunk = {
-            "error": {
-                "message": str(e),
-                "type": "api_error"
-            }
-        }
+        error_chunk = {"error": {"message": str(e), "type": "api_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
-
-
-async def get_langchain_response(
-        model,
-        messages: List,
-        model_name: str,
-        response_data: ResponseData
-) -> dict:
-    """Get non-streaming response from LangChain model"""
-    try:
-        response = await asyncio.to_thread(
-            lambda: model.invoke(messages)
-        )
-
-        response_text = response if isinstance(response, str) else str(response)
-
-        # Save response
-        response_data.response = response_text
-        await save_response_to_db(response_data)
-
-        return {
-            "id": f"chatcmpl-{int(time.time())}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": model_name,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": response_text
-                    },
-                    "logprobs": None,
-                    "finish_reason": "stop"
-                }
-            ],
-            "usage": {
-                "prompt_tokens": 10,  # Placeholder
-                "completion_tokens": len(response_text.split()),
-                "total_tokens": 10 + len(response_text.split())
-            }
-        }
-    except Exception as e:
-        logger.error(f"Error getting response: {e}")
-        raise
 
 
 async def get_custom_headers(
@@ -351,13 +291,9 @@ async def get_custom_headers(
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info(f"🔥 REQUEST: {request.method} {request.url.path}")
-
-    # Log custom headers
-    logger.info("🔍 Custom Headers:")
     for name, value in request.headers.items():
         if name.lower().startswith('x-'):
             logger.info(f"   {name}: {value}")
-
     response = await call_next(request)
     logger.info(f"🔥 RESPONSE STATUS: {response.status_code}")
     return response
@@ -368,9 +304,12 @@ async def chat_completions(
         request: ChatRequest,
         headers: CustomHeaders = Depends(get_custom_headers)
 ):
-    logger.info(f"🔧 LangChain Request from User: {headers.user_id}")
-    logger.info(f"   Model Preference: {headers.model_preference}")
-    logger.info(f"   Use Case: {headers.use_case}, Priority: {headers.priority}")
+    logger.info(f"🔧 Context-Aware Request from User: {headers.user_id}")
+    logger.info(f"   Project: {headers.project_name}")
+
+    # Set defaults
+    project_name = headers.project_name or "default"
+    user_id = headers.user_id or "anonymous"
 
     # Route to appropriate model
     model_to_use = route_model_by_preference(headers, request.model)
@@ -392,76 +331,150 @@ async def chat_completions(
     # Convert messages to LangChain format
     langchain_messages = convert_messages_to_langchain(request.messages)
 
-    # Prepare response data for saving
-    response_data = ResponseData(
-        user_id=headers.user_id or "anonymous",
-        team_id=headers.team_id or "default",
-        session_id=headers.session_id or f"session-{int(time.time())}",
-        project_name=headers.project_name or "default",
-        model_used=model_to_use,
-        messages=request.messages,
-        response="",  # Will be filled later
-        timestamp=datetime.now(),
-        metadata={
-            "temperature": request.temperature,
-            "max_tokens": max_tokens,
-            "use_case": headers.use_case,
-            "priority": headers.priority
-        }
-    )
+    # Process through context workflow
+    if context_workflow:
+        logger.info("   🧠 Processing with context awareness")
+
+        # Run the workflow to get context-enhanced messages
+        workflow_state = await context_workflow.process(
+            messages=langchain_messages,
+            project_name=project_name,
+            user_id=user_id,
+            model=model_to_use
+        )
+
+        # Use the context-enhanced messages
+        langchain_messages = workflow_state["messages"]
+
+        logger.info(f"   📚 Context injected: {workflow_state['context_used']}")
 
     try:
         if request.stream:
-            logger.info("   📡 Streaming response via LangChain")
+            logger.info("   📡 Streaming response with context")
+
             return StreamingResponse(
-                stream_langchain_response(model, langchain_messages, model_to_use, response_data),
+                stream_langchain_response_with_context(
+                    model, langchain_messages, model_to_use, workflow_state
+                ),
                 media_type="text/plain",
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
-                    "X-Model-Used": model_to_use
+                    "X-Model-Used": model_to_use,
+                    "X-Context-Used": str(workflow_state.get("context_used", False))
                 }
             )
         else:
-            logger.info("   📄 Non-streaming response via LangChain")
-            response = await get_langchain_response(model, langchain_messages, model_to_use, response_data)
-            return response
+            logger.info("   📄 Non-streaming response with context")
+
+            # Get response
+            response = await asyncio.to_thread(
+                lambda: model.invoke(langchain_messages)
+            )
+            response_text = response if isinstance(response, str) else str(response)
+
+            # Save to context
+            if context_workflow:
+                workflow_state["final_response"] = response_text
+                await context_workflow.save_interaction(workflow_state)
+
+            return {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model_to_use,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": response_text},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": len(response_text.split()),
+                    "total_tokens": 10 + len(response_text.split())
+                }
+            }
 
     except Exception as e:
         logger.error(f"   ❌ Error processing request: {e}")
         return {"error": f"Error processing request: {str(e)}"}
 
 
+@app.post("/star/{message_id}")
+async def star_message(message_id: str):
+    """Star a message for quality curation"""
+    if context_manager:
+        await context_manager.star_message(message_id)
+        return {"status": "success", "message_id": message_id}
+    return {"error": "Context manager not initialized"}
+
+
+@app.get("/projects/{project_name}/starred")
+async def get_starred_messages(project_name: str):
+    """Get starred messages for a project"""
+    if context_manager:
+        messages = await context_manager.get_starred_messages(project_name)
+        return {"project": project_name, "starred_messages": messages}
+    return {"error": "Context manager not initialized"}
+
+
 @app.get("/")
 async def root():
     return {
-        "message": "LangChain AI Proxy Server",
-        "version": "1.0.0",
+        "message": "LangChain AI Proxy Server with Context",
+        "version": "2.0.0",
         "supported_models": list(MODEL_CONFIGS.keys()),
         "features": [
             "Multi-model routing",
             "Streaming responses",
-            "Response saving",
-            "Custom headers support"
+            "Context-aware responses",
+            "Project-based knowledge",
+            "Vector similarity search",
+            "Message starring",
+            "LangGraph workflows"
         ]
     }
 
 
-@app.get("/models")
-async def list_models():
-    """List available models and their configurations"""
-    return {
-        "models": MODEL_CONFIGS,
-        "routing_info": "Set X-Model-Preference header or specify model in request"
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    health_status = {
+        "status": "healthy",
+        "context_manager": context_manager is not None,
+        "context_workflow": context_workflow is not None
     }
+
+    # Check database connections
+    if context_manager:
+        try:
+            # Test PostgreSQL
+            async with context_manager.pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            health_status["postgresql"] = "connected"
+        except:
+            health_status["postgresql"] = "disconnected"
+            health_status["status"] = "degraded"
+
+        try:
+            # Test Qdrant
+            context_manager.qdrant_client.get_collections()
+            health_status["qdrant"] = "connected"
+        except:
+            health_status["qdrant"] = "disconnected"
+            health_status["status"] = "degraded"
+
+    return health_status
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    # Make sure Ollama is running for Gemma
-    logger.info("🚀 Starting LangChain AI Proxy Server")
-    logger.info("   Make sure Ollama is running: ollama serve")
-    logger.info("   And Gemma is pulled: ollama pull gemma:4b")
+    logger.info("🚀 Starting Context-Aware LangChain AI Proxy Server")
+    logger.info("   Make sure Docker services are running:")
+    logger.info("   docker-compose up -d")
+    logger.info("   And Ollama models are available:")
+    logger.info("   ollama pull gemma3:4b")
+    logger.info("   ollama pull nomic-embed-text")
 
     uvicorn.run(app, host="0.0.0.0", port=8000)

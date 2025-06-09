@@ -6,7 +6,7 @@ from typing import List, Dict, Optional, Tuple
 import uuid
 from datetime import datetime
 import logging
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
 import json
 
 logger = logging.getLogger(__name__)

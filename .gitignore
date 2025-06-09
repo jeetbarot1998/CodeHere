@@ -2,3 +2,4 @@ continur
 /continue/
 /.idea
 /.venv
+.env
