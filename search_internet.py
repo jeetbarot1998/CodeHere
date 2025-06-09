@@ -3,7 +3,7 @@ from langchain_ollama import OllamaLLM
 from googlesearch import search
 
 def search_web(query):
-    results = list(search(query, num_results=3))
+    results = list(search(query, num_results=2))
     return "\n".join(results)
 
 tools = [Tool(name="Search", func=search_web, description="Search the web")]
