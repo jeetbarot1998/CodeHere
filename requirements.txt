@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+pydantic
+httpx
+openai
+anthropic
+sqlalchemy
+psycopg2-binary
+redis
+qdrant-client
+langchain
+langchain-community
+langchain-ollama
+ollama
+duckduckgo_search==0.9
+googlesearch-python

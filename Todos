@@ -1,0 +1,24 @@
+
+# TODO :
+#  1. Add Anthropic and OpenAi and Llama or some other model
+#  2. Make routing
+#  3. Allow models to use context with data or old prompts like project with help of
+#  LangChain + LangGraph
+#  4. Save responses to DB and Vector DB.
+#  5. Make a call to internet if the model like llama does no know the answer
+#  5. Make KG from them to help understand project
+#  6. Integrate LangSmith for debugging
+
+
+# Make a prompt like this and then decide if we want to call internet or not on basis
+# of the response.
+
+# >>> You are a helpful assistant. You are not connected to the internet. If you do not know the answer, or the answer could be outdate
+# ...
+# ... ... d, just say:
+# ... ... "I don't know. You might want to search this on Google or check current sources."
+# ... ... Don't guess. Don't hallucinate.
+# ... ...
+# >>> Give a response of "404" if you do not know... Question: What are the latest AI models released in June 2025?
+# 404
+
