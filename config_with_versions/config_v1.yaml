@@ -1,0 +1,43 @@
+name: Local Assistant
+version: 1.0.0
+schema: v1
+models:
+  - name: CentralVM-Gateway
+    provider: openai
+    model: custom-model
+    apiBase: http://localhost:8000
+    supportsChat: true
+  # Local Llama : ollama pull llama3.1:8b
+  - name: Gemma3 4B (Local)
+    provider: ollama
+    model: gemma3:4B
+
+# Directly use model with API KEY
+  # - name:
+  #   title: "GPT‑4 Turbo"
+  #   provider: "openai"
+  #   model: "gpt‑4‑turbo"
+  #   apiKey: "sk‑YOUR_OPENAI_API_KEY"
+
+
+# We can only have 1 embedding providers at a time
+# Use this for cloud embeddings
+# embeddingsProvider:
+#   provider: openai
+#   model: text-embedding-3-large
+#   apiKey: sk-YOUR_OPENAI_API_KEY
+
+# Use this for local embeddings : ollama pull nomic-embed-text:latest
+embeddingsProvider:
+  provider: ollama
+  model: nomic-embed-text
+
+
+context:
+  - provider: code
+  - provider: docs
+  - provider: diff
+  - provider: terminal
+  - provider: problems
+  - provider: folder
+  - provider: codebase
