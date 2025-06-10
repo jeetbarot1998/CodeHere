@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 # Global context manager and workflow
 context_manager = None
 context_workflow : ContextAwareWorkflow = None
-
 load_dotenv()
 
 @asynccontextmanager
@@ -75,7 +74,7 @@ class ChatRequest(BaseModel):
 class CustomHeaders(BaseModel):
     user_id: Optional[str] = None
     team_id: Optional[str] = None
-    session_id: Optional[str] = None  # Added session_id support
+    session_id: Optional[str] = None
     model_preference: Optional[str] = None
     max_tokens: Optional[str] = None
     enable_starring: Optional[str] = None
@@ -83,6 +82,10 @@ class CustomHeaders(BaseModel):
     environment: Optional[str] = None
     priority: Optional[str] = None
     use_case: Optional[str] = None
+    # Code-specific headers
+    language: Optional[str] = None  # Programming language
+    task_type: Optional[str] = None  # debug, implement, explain, review, refactor
+    file_path: Optional[str] = None  # File being discussed
 
 
 # Model configuration (same as before)
@@ -265,26 +268,33 @@ async def stream_langchain_response_with_context(
 async def get_custom_headers(
         x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
         x_team_id: Optional[str] = Header(None, alias="X-Team-ID"),
-        x_session_id: Optional[str] = Header(None, alias="X-Session-ID"),  # Added session_id header
+        x_session_id: Optional[str] = Header(None, alias="X-Session-ID"),
         x_model_preference: Optional[str] = Header(None, alias="X-Model-Preference"),
         x_max_tokens: Optional[str] = Header(None, alias="X-Max-Tokens"),
         x_enable_starring: Optional[str] = Header(None, alias="X-Enable-Starring"),
         x_project_name: Optional[str] = Header(None, alias="X-Project-Name"),
         x_environment: Optional[str] = Header(None, alias="X-Environment"),
         x_priority: Optional[str] = Header(None, alias="X-Priority"),
-        x_use_case: Optional[str] = Header(None, alias="X-Use-Case")
+        x_use_case: Optional[str] = Header(None, alias="X-Use-Case"),
+        # Code-specific headers
+        x_language: Optional[str] = Header(None, alias="X-Language"),
+        x_task_type: Optional[str] = Header(None, alias="X-Task-Type"),
+        x_file_path: Optional[str] = Header(None, alias="X-File-Path")
 ) -> CustomHeaders:
     return CustomHeaders(
         user_id=x_user_id,
         team_id=x_team_id,
-        session_id=x_session_id,  # Pass session_id to CustomHeaders
+        session_id=x_session_id,
         model_preference=x_model_preference,
         max_tokens=x_max_tokens,
         enable_starring=x_enable_starring,
         project_name=x_project_name,
         environment=x_environment,
         priority=x_priority,
-        use_case=x_use_case
+        use_case=x_use_case,
+        language=x_language,
+        task_type=x_task_type,
+        file_path=x_file_path
     )
 
 
@@ -306,12 +316,14 @@ async def chat_completions(
 ):
     logger.info(f"🔧 Context-Aware Request from User: {headers.user_id}")
     logger.info(f"   Project: {headers.project_name}")
-    logger.info(f"   Session: {headers.session_id}")  # Log session_id
+    logger.info(f"   Session: {headers.session_id}")
+    logger.info(f"   Language: {headers.language}")  # Log programming language
+    logger.info(f"   Task Type: {headers.task_type}")  # Log task type
 
     # Set defaults
     project_name = headers.project_name or "default"
     user_id = headers.user_id or "anonymous"
-    session_id = headers.session_id or "default_session"  # Default session if not provided
+    session_id = headers.session_id or "default_session"
 
     # Route to appropriate model
     model_to_use = route_model_by_preference(headers, request.model)
@@ -343,8 +355,9 @@ async def chat_completions(
             messages=langchain_messages,
             project_name=project_name,
             user_id=user_id,
-            session_id=session_id,  # Pass session_id to workflow
-            model=model_to_use
+            session_id=session_id,
+            model=model_to_use,
+            headers=headers  # Pass the CustomHeaders object directly
         )
 
         # Use the context-enhanced messages
@@ -366,7 +379,9 @@ async def chat_completions(
                     "Connection": "keep-alive",
                     "X-Model-Used": model_to_use,
                     "X-Context-Used": str(workflow_state.get("context_used", False)),
-                    "X-Session-ID": session_id  # Return session_id in response headers
+                    "X-Session-ID": session_id,
+                    "X-Language": headers.language or "python",  # Return detected language
+                    "X-Task-Type": workflow_state.get("detected_task_type", "general") if workflow_state else "general"
                 }
             )
         else:
@@ -420,6 +435,33 @@ async def get_starred_messages(project_name: str):
     if context_manager:
         messages = await context_manager.get_starred_messages(project_name)
         return {"project": project_name, "starred_messages": messages}
+    return {"error": "Context manager not initialized"}
+
+
+@app.get("/projects/{project_name}/code-stats")
+async def get_project_code_stats(project_name: str):
+    """Get coding statistics for a project"""
+    if context_manager:
+        stats = await context_manager.get_project_code_statistics(project_name)
+        return {"project": project_name, "code_statistics": stats}
+    return {"error": "Context manager not initialized"}
+
+
+@app.get("/projects/{project_name}/libraries")
+async def get_project_libraries(project_name: str):
+    """Get most used libraries in a project"""
+    if context_manager:
+        libraries = await context_manager.get_project_libraries(project_name)
+        return {"project": project_name, "libraries": libraries}
+    return {"error": "Context manager not initialized"}
+
+
+@app.post("/tag/{message_id}")
+async def tag_message(message_id: str, tag: str = "helpful"):
+    """Tag a message for training data curation"""
+    if context_manager:
+        await context_manager.tag_message(message_id, tag)
+        return {"status": "success", "message_id": message_id, "tag": tag}
     return {"error": "Context manager not initialized"}
 
 

@@ -313,3 +313,119 @@ class ContextManager:
             """, project_name)
 
         return [{"question": row["question"], "answer": row["answer"]} for row in rows]
+
+    async def tag_message(self, message_id: str, tag: str) -> None:
+        """Tag a message for training data curation"""
+        async with self.pool.acquire() as conn:
+            # Get current metadata
+            current_metadata = await conn.fetchval("""
+                SELECT metadata FROM messages WHERE id = $1::uuid
+            """, uuid.UUID(message_id))
+
+            if current_metadata:
+                metadata = json.loads(current_metadata)
+            else:
+                metadata = {}
+
+            # Add tag to metadata
+            if "tags" not in metadata:
+                metadata["tags"] = []
+
+            if tag not in metadata["tags"]:
+                metadata["tags"].append(tag)
+
+            # Update message with new metadata
+            await conn.execute("""
+                UPDATE messages 
+                SET metadata = $1
+                WHERE id = $2::uuid
+            """, json.dumps(metadata), uuid.UUID(message_id))
+
+    async def get_project_code_statistics(self, project_name: str) -> Dict:
+        """Get coding statistics for a project"""
+        async with self.pool.acquire() as conn:
+            stats = await conn.fetchrow("""
+                SELECT 
+                    COUNT(*) as total_messages,
+                    COUNT(CASE WHEN role = 'user' THEN 1 END) as user_messages,
+                    COUNT(CASE WHEN role = 'assistant' THEN 1 END) as assistant_messages,
+                    COUNT(CASE WHEN metadata->>'is_error_related' = 'true' THEN 1 END) as error_discussions,
+                    COUNT(CASE WHEN metadata->>'has_code_blocks' = 'true' THEN 1 END) as messages_with_code,
+                    AVG(CAST(metadata->>'complexity_score' AS INTEGER)) as avg_complexity,
+                    COUNT(DISTINCT session_id) as total_sessions,
+                    COUNT(DISTINCT metadata->>'language') as languages_used
+                FROM messages 
+                WHERE project_name = $1
+            """, project_name)
+
+            # Get top languages
+            language_stats = await conn.fetch("""
+                SELECT 
+                    metadata->>'language' as language,
+                    COUNT(*) as count
+                FROM messages 
+                WHERE project_name = $1 AND metadata->>'language' IS NOT NULL
+                GROUP BY metadata->>'language'
+                ORDER BY count DESC
+                LIMIT 5
+            """, project_name)
+
+            # Get top task types
+            task_stats = await conn.fetch("""
+                SELECT 
+                    metadata->>'task_type' as task_type,
+                    COUNT(*) as count
+                FROM messages 
+                WHERE project_name = $1 AND metadata->>'task_type' IS NOT NULL
+                GROUP BY metadata->>'task_type'
+                ORDER BY count DESC
+                LIMIT 5
+            """, project_name)
+
+            return {
+                "total_messages": stats["total_messages"],
+                "user_messages": stats["user_messages"],
+                "assistant_messages": stats["assistant_messages"],
+                "error_discussions": stats["error_discussions"],
+                "messages_with_code": stats["messages_with_code"],
+                "avg_complexity": float(stats["avg_complexity"]) if stats["avg_complexity"] else 0,
+                "total_sessions": stats["total_sessions"],
+                "languages_used": stats["languages_used"],
+                "top_languages": [{"language": row["language"], "count": row["count"]} for row in language_stats],
+                "top_task_types": [{"task_type": row["task_type"], "count": row["count"]} for row in task_stats]
+            }
+
+    async def get_project_libraries(self, project_name: str) -> List[Dict]:
+        """Get most used libraries in a project"""
+        async with self.pool.acquire() as conn:
+            # This is a simplified version - for full implementation,
+            # you'd need to parse the code_analysis JSON from metadata
+            rows = await conn.fetch("""
+                SELECT 
+                    metadata,
+                    created_at
+                FROM messages 
+                WHERE project_name = $1 
+                AND metadata->>'code_analysis' IS NOT NULL
+                ORDER BY created_at DESC
+                LIMIT 100
+            """, project_name)
+
+            # Count library usage across messages
+            library_counts = {}
+            for row in rows:
+                metadata = row["metadata"]
+                if isinstance(metadata, str):
+                    metadata = json.loads(metadata)
+
+                code_analysis = metadata.get("code_analysis", {})
+                imports = code_analysis.get("imports", {})
+                all_libraries = imports.get("all_libraries", [])
+
+                for lib in all_libraries:
+                    library_counts[lib] = library_counts.get(lib, 0) + 1
+
+            # Sort by usage count
+            sorted_libraries = sorted(library_counts.items(), key=lambda x: x[1], reverse=True)
+
+            return [{"library": lib, "usage_count": count} for lib, count in sorted_libraries[:10]]
