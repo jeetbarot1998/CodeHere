@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- Messages table (individual messages for better context search)
 CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id VARCHAR(255),
     project_name VARCHAR(255) REFERENCES projects(project_name),
     user_id VARCHAR(255) REFERENCES users(user_id),
     role VARCHAR(50) NOT NULL, -- 'user' or 'assistant'
@@ -37,6 +38,7 @@ CREATE INDEX idx_messages_user_id ON messages(user_id);
 CREATE INDEX idx_messages_created_at ON messages(created_at);
 CREATE INDEX idx_messages_starred ON messages(starred);
 CREATE INDEX idx_messages_parent_id ON messages(parent_message_id);
+CREATE INDEX idx_messages_session_id ON messages(session_id);
 
 -- Update timestamp trigger
 CREATE OR REPLACE FUNCTION update_updated_at()

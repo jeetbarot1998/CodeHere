@@ -13,6 +13,7 @@ class ConversationState(TypedDict):
     messages: List
     project_name: str
     user_id: str
+    session_id: str  # Added session_id to state
     model: str
 
     # Context
@@ -65,10 +66,11 @@ class ContextAwareWorkflow:
             limit=3
         )
 
-        # Get recent messages
+        # Get recent messages from the current session
         recent_messages = await self.context_manager.get_recent_messages(
             project_name=state["project_name"],
             user_id=state["user_id"],
+            session_id=state["session_id"],  # Filter by session_id
             limit=3
         )
 
@@ -76,7 +78,8 @@ class ContextAwareWorkflow:
         state["recent_messages"] = recent_messages
         state["context_used"] = bool(similar_contexts or recent_messages)
 
-        logger.info(f"Found {len(similar_contexts)} similar contexts and {len(recent_messages)} recent messages")
+        logger.info(
+            f"Found {len(similar_contexts)} similar contexts and {len(recent_messages)} recent messages in session {state['session_id']}")
 
         return state
 
@@ -87,13 +90,14 @@ class ContextAwareWorkflow:
         context_template = SystemMessagePromptTemplate.from_template(
             """You are part of an AI development team assistant. 
             You have access to previous conversations from this project that might be relevant.
-        
+
             Project: {project_name}
+            Session: {session_id}
             ==================================================
-        
+
             {similar_contexts}
             {recent_history}
-        
+
             Please consider this context when answering, but only reference it if directly relevant.
             Maintain consistency with previous answers when applicable."""
         )
@@ -109,6 +113,7 @@ class ContextAwareWorkflow:
             # Format the system message using the template
             system_message = context_template.format(
                 project_name=state["project_name"],
+                session_id=state["session_id"],  # Include session_id in context
                 similar_contexts=similar_contexts_text,
                 recent_history=recent_history_text
             )
@@ -143,7 +148,7 @@ class ContextAwareWorkflow:
         if not recent_messages:
             return ""
 
-        lines = ["\n### Recent Conversation History:"]
+        lines = ["\n### Recent Conversation History in this Session:"]
 
         for msg in recent_messages:
             role = "User" if msg["role"] == "user" else "Assistant"
@@ -168,19 +173,21 @@ class ContextAwareWorkflow:
                 break
 
         if user_message and state.get("final_response"):
-            # Save user message
+            # Save user message with session_id
             user_msg_id = await self.context_manager.save_message(
                 project_name=state["project_name"],
                 user_id=state["user_id"],
+                session_id=state["session_id"],  # Pass session_id
                 role="user",
                 content=user_message,
                 metadata={"context_used": state.get("context_used", False)}
             )
 
-            # Save assistant response with link to user message
+            # Save assistant response with link to user message and session_id
             await self.context_manager.save_message(
                 project_name=state["project_name"],
                 user_id=state["user_id"],
+                session_id=state["session_id"],  # Pass session_id
                 role="assistant",
                 content=state["final_response"],
                 model_used=state["model"],
@@ -192,7 +199,7 @@ class ContextAwareWorkflow:
                 }
             )
 
-            logger.info(f"Saved Q&A pair for project {state['project_name']}")
+            logger.info(f"Saved Q&A pair for project {state['project_name']}, session {state['session_id']}")
 
         return state
 
@@ -200,6 +207,7 @@ class ContextAwareWorkflow:
                       messages: List,
                       project_name: str,
                       user_id: str,
+                      session_id: str,  # Added session_id parameter
                       model: str) -> ConversationState:
         """Process a conversation through the workflow"""
 
@@ -207,6 +215,7 @@ class ContextAwareWorkflow:
             messages=messages,
             project_name=project_name,
             user_id=user_id,
+            session_id=session_id,  # Include session_id in state
             model=model,
             similar_contexts=[],
             recent_messages=[],

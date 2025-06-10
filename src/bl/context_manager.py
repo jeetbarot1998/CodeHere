@@ -70,6 +70,7 @@ class ContextManager:
     async def save_message(self,
                            project_name: str,
                            user_id: str,
+                           session_id: str,  # Added session_id parameter
                            role: str,
                            content: str,
                            model_used: Optional[str] = None,
@@ -93,10 +94,10 @@ class ContextManager:
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO messages 
-                (id, project_name, user_id, role, content, parent_message_id, 
+                (id, project_name, user_id, session_id, role, content, parent_message_id, 
                  model_used, metadata, vector_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            """, uuid.UUID(message_id), project_name, user_id, role, content,
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """, uuid.UUID(message_id), project_name, user_id, session_id, role, content,
                                uuid.UUID(parent_message_id) if parent_message_id else None,
                                model_used, json.dumps(metadata or {}), vector_id)
 
@@ -108,6 +109,7 @@ class ContextManager:
                 "message_id": message_id,
                 "project_name": project_name,
                 "user_id": user_id,
+                "session_id": session_id,  # Include session_id in payload
                 "role": role,
                 "content": content,
                 "parent_message_id": parent_message_id,
@@ -120,26 +122,14 @@ class ContextManager:
             points=[point]
         )
 
-        logger.info(f"Saved message {message_id} for project {project_name}")
+        logger.info(f"Saved message {message_id} for project {project_name}, session {session_id}")
         return message_id
 
     async def search_similar_context(self,
                                      query: str,
                                      project_name: str,
                                      limit: int = 3) -> List[Dict]:
-        """
-            When we search for "What is singleton pattern?", Qdrant might return:
-
-            An answer about singleton (without its question)
-            A similar question (without its answer)
-            Random matches from the middle of conversations
-
-
-            We need complete Q&A pairs for context, so the code:
-
-            If it finds an answer → looks up its question in PostgreSQL or Qdrant
-            If it finds a question → looks up its answer in PostgreSQL or Qdrant
-        """
+        """Search for similar messages within a project using Qdrant only"""
 
         # Generate embedding for query
         query_embedding = await asyncio.to_thread(
@@ -166,6 +156,19 @@ class ContextManager:
         context_items = []
         seen_pairs = set()
 
+        """
+            When we search for "What is singleton pattern?", Qdrant might return:
+
+            An answer about singleton (without its question)
+            A similar question (without its answer)
+            Random matches from the middle of conversations
+
+
+            We need complete Q&A pairs for context, so the code:
+
+            If it finds an answer → looks up its question in PostgreSQL or Qdrant
+            If it finds a question → looks up its answer in PostgreSQL or Qdrant
+        """
         for hit in search_result:
             payload = hit.payload
 
@@ -236,17 +239,18 @@ class ContextManager:
     async def get_recent_messages(self,
                                   project_name: str,
                                   user_id: str,
+                                  session_id: str,  # Added session_id parameter
                                   limit: int = 3) -> List[Dict]:
-        """Get recent messages from the current project"""
+        """Get recent messages from the current session"""
 
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT role, content, created_at
                 FROM messages
-                WHERE project_name = $1 AND user_id = $2
+                WHERE project_name = $1 AND user_id = $2 AND session_id = $3
                 ORDER BY created_at DESC
-                LIMIT $3
-            """, project_name, user_id, limit * 2)  # Get both Q&A pairs
+                LIMIT $4
+            """, project_name, user_id, session_id, limit * 2)  # Get both Q&A pairs
 
         # Convert to list and reverse to maintain chronological order
         messages = [
@@ -259,6 +263,31 @@ class ContextManager:
         ]
 
         return messages[-limit:] if len(messages) > limit else messages
+
+    async def get_session_messages(self,
+                                   project_name: str,
+                                   user_id: str,
+                                   session_id: str) -> List[Dict]:
+        """Get all messages from a specific session"""
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT role, content, created_at, model_used, metadata
+                FROM messages
+                WHERE project_name = $1 AND user_id = $2 AND session_id = $3
+                ORDER BY created_at ASC
+            """, project_name, user_id, session_id)
+
+        return [
+            {
+                "role": row["role"],
+                "content": row["content"],
+                "timestamp": row["created_at"].isoformat(),
+                "model_used": row["model_used"],
+                "metadata": row["metadata"]
+            }
+            for row in rows
+        ]
 
     async def star_message(self, message_id: str) -> None:
         """Star a message for quality curation"""
