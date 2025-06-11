@@ -31,6 +31,7 @@ services:
       - qdrant_storage:/qdrant/storage
     environment:
       QDRANT__SERVICE__GRPC_PORT: 6334
+      QDRANT__UI__ENABLED: "true"       # ✅ Enable UI: to View open (http://localhost:6333/dashboard)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
       interval: 10s

@@ -1,0 +1,114 @@
+name: Local Assistant
+version: 1.0.0
+schema: v1
+
+models:
+  # Your main custom gateway with custom headers
+  - name: CentralVM-Gateway-openai
+    provider: openai
+    model: custom-model
+    apiBase: http://localhost:8000
+    supportsChat: true
+    temperature: 0.7
+    maxTokens: 8192  # Increase this (if your backend supports it)
+    requestOptions:
+      headers:
+        X-User-ID: "dev_user_001"
+        X-Team-ID: "frontend_team"
+        X-Session-ID: "session_001"  # Change this manually for new sessions
+        X-Model-Preference: "openai"
+        X-Max-Tokens: "4096"
+        X-Enable-Starring: "true"
+        X-Project-Name: "ai_code_assistant"
+        X-Environment: "development"
+        X-Priority: "balanced"
+
+  # Different configs for different use cases
+  - name: CentralVM-Fast-gemma3:4B
+    provider: openai
+    model: fast-model
+    apiBase: http://localhost:8000
+    supportsChat: true
+    temperature: 0.3
+    maxTokens: 8192  # Increase this (if your backend supports it)
+    requestOptions:
+      headers:
+        X-User-ID: "dev_user_001"
+        X-Session-ID: "session_001"  # Change this manually for new sessions
+        X-Model-Preference: "local"
+        X-Project-Name: "ai_code_assistant"
+        X-Max-Tokens: "2048"
+        X-Priority: "fast"
+        X-Use-Case: "quick_answers"
+
+  - name: CentralVM-Quality-claude
+    provider: openai
+    model: quality-model
+    apiBase: http://localhost:8000
+    supportsChat: true
+    temperature: 0.8
+    maxTokens: 8192  # Increase this (if your backend supports it)
+    requestOptions:
+      headers:
+        X-User-ID: "dev_user_001"
+        X-Session-ID: "session_001"  # Change this manually for new sessions
+        X-Model-Preference: "anthropic"
+        X-Project-Name: "ai_code_assistant"
+        X-Max-Tokens: "4096"
+        X-Priority: "quality"
+        X-Use-Case: "complex_tasks"
+
+  # Local Llama : ollama pull llama3.1:8b
+  - name: Gemma3 4B (Local)
+    provider: ollama
+    model: gemma3:4B
+    requestOptions:
+      headers:
+        X-User-ID: "dev_user_001"
+        X-Session-ID: "session_001"  # Change this manually for new sessions
+        X-Model-Type: "local"
+
+# We can only have 1 embedding providers at a time
+# Use this for local embeddings : ollama pull nomic-embed-text:latest
+embeddingsProvider:
+  provider: ollama
+  model: nomic-embed-text
+
+context:
+  - provider: code
+  - provider: docs
+  - provider: diff
+  - provider: terminal
+  - provider: problems
+  - provider: folder
+  - provider: codebase
+
+# Custom settings that can be used by your FastAPI
+customSettings:
+  userProfile:
+    userId: "dev_user_001"
+    teamId: "frontend_team"
+    department: "engineering"
+    role: "senior_developer"
+
+  preferences:
+    defaultModel: "openai"
+    starringEnabled: true
+    knowledgeBaseExport: true
+    sessionTracking: true
+
+  routing:
+    fastQueries: "local"
+    complexQueries: "openai"
+    codeGeneration: "anthropic"
+
+# Session Management Instructions:
+# To start a new session, change X-Session-ID to a new unique value like:
+# X-Session-ID: "session_002"
+# X-Session-ID: "debugging_session_2024_06_10"
+# X-Session-ID: "feature_development_auth"
+#
+# Session naming suggestions:
+# - Use descriptive names: "debugging_login_issue", "feature_user_auth"
+# - Include dates: "session_2024_06_10_morning"
+# - Use project phases: "planning_phase", "implementation_phase"
