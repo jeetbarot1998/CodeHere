@@ -32,6 +32,52 @@ CREATE TABLE IF NOT EXISTS messages (
     vector_id VARCHAR(255) -- Reference to Qdrant vector ID
 );
 
+-- Artifacts table for storing file contents and training data
+CREATE TABLE IF NOT EXISTS artifacts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    message_id UUID REFERENCES messages(id) ON DELETE CASCADE,
+    project_name VARCHAR(255) NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    session_id VARCHAR(255) NOT NULL,
+
+    -- File information
+    file_path VARCHAR(500),
+    file_name VARCHAR(255),
+    language VARCHAR(50) NOT NULL,
+    file_extension VARCHAR(10),
+
+    -- Content and metadata
+    content TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    artifact_type VARCHAR(100) DEFAULT 'code_file',
+
+    -- Processing metadata
+    extraction_method VARCHAR(50), -- 'code_block', 'file_mention', 'auto_detected'
+    was_large_file BOOLEAN DEFAULT FALSE,
+    original_format VARCHAR(50), -- 'markdown_code_block', 'raw_text', etc.
+
+    -- Training metadata
+    complexity_score INTEGER DEFAULT 0,
+    has_functions BOOLEAN DEFAULT FALSE,
+    has_classes BOOLEAN DEFAULT FALSE,
+    has_imports BOOLEAN DEFAULT FALSE,
+    is_complete_file BOOLEAN DEFAULT TRUE,
+
+    -- Timestamps
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for efficient queries
+CREATE INDEX idx_artifacts_message_id ON artifacts(message_id);
+CREATE INDEX idx_artifacts_project_session ON artifacts(project_name, session_id);
+CREATE INDEX idx_artifacts_language ON artifacts(language);
+CREATE INDEX idx_artifacts_file_path ON artifacts(file_path);
+CREATE INDEX idx_artifacts_user_id ON artifacts(user_id);
+CREATE INDEX idx_artifacts_created_at ON artifacts(created_at);
+CREATE INDEX idx_artifacts_size ON artifacts(size_bytes);
+
+
 -- Create indexes for better performance
 CREATE INDEX idx_messages_project_name ON messages(project_name);
 CREATE INDEX idx_messages_user_id ON messages(user_id);
@@ -54,3 +100,9 @@ CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
 
 CREATE TRIGGER update_projects_updated_at BEFORE UPDATE ON projects
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- Update timestamp trigger for artifacts
+CREATE TRIGGER update_artifacts_updated_at
+    BEFORE UPDATE ON artifacts
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at();

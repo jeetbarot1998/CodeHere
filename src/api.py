@@ -8,6 +8,7 @@ import json
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from helpers.artifact_handler import ArtifactHandler  # Import artifact handler
 
 # LangChain imports
 from langchain_ollama import OllamaLLM as Ollama
@@ -26,7 +27,10 @@ logger = logging.getLogger(__name__)
 # Global context manager and workflow
 context_manager = None
 context_workflow : ContextAwareWorkflow = None
-load_dotenv()
+artifact_handler = ArtifactHandler(size_threshold=500)  # Initialize artifact handler
+
+load_dotenv('.env', override=True)  # Force load from specific file
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -108,7 +112,6 @@ MODEL_CONFIGS = {
 }
 
 
-
 def get_langchain_model(model_name: str, temperature: float = 0.7, max_tokens: int = 2048):
     """Factory function to create LangChain model instances"""
     config = MODEL_CONFIGS.get(model_name.lower())
@@ -140,15 +143,30 @@ def get_langchain_model(model_name: str, temperature: float = 0.7, max_tokens: i
         raise ValueError(f"Unsupported model type: {config['type']}")
 
 
-def convert_messages_to_langchain(messages: List[Message]) -> List:
-    """Convert OpenAI format messages to LangChain format"""
+def convert_messages_to_langchain(model_to_use, messages: List[Message]) -> List:
+    """Convert OpenAI format messages to LangChain format with artifact processing"""
+    global artifact_handler
     langchain_messages = []
 
     for message in messages:
         content = extract_text_content(message.content)
 
+        # Process content for artifacts if it's a user message
         if message.role == "user":
-            langchain_messages.append(HumanMessage(content=content))
+            # Do this artifact only for claude.
+            if model_to_use == "anthropic":
+                # Check for file contents that should be artifacts
+                cleaned_content, artifacts = artifact_handler.process_message_for_artifacts(content)
+
+                # Add artifacts as separate messages before the user message
+                for artifact in artifacts:
+                    langchain_messages.append(HumanMessage(content=artifact["text"]))
+
+                # Add the cleaned user message
+                langchain_messages.append(HumanMessage(content=cleaned_content))
+            else:
+                langchain_messages.append(HumanMessage(content=content))
+
         elif message.role == "assistant":
             langchain_messages.append(AIMessage(content=content))
         elif message.role == "system":
@@ -343,7 +361,7 @@ async def chat_completions(
         return {"error": f"Failed to load model {model_to_use}: {str(e)}"}
 
     # Convert messages to LangChain format
-    langchain_messages = convert_messages_to_langchain(request.messages)
+    langchain_messages = convert_messages_to_langchain(model_to_use, request.messages)
     workflow_state = None
 
     # Process through context workflow
@@ -351,7 +369,7 @@ async def chat_completions(
         logger.info("   🧠 Processing with context awareness")
 
         # Run the workflow to get context-enhanced messages
-        workflow_state : ConversationState = await context_workflow.process(
+        workflow_state: ConversationState = await context_workflow.process(
             messages=langchain_messages,
             project_name=project_name,
             user_id=user_id,
@@ -361,7 +379,7 @@ async def chat_completions(
         )
 
         # Use the context-enhanced messages
-        langchain_messages :List = workflow_state["messages"]
+        langchain_messages: List = workflow_state["messages"]
 
         logger.info(f"   📚 Context injected: {workflow_state['context_used']}")
 
@@ -381,7 +399,8 @@ async def chat_completions(
                     "X-Context-Used": str(workflow_state.get("context_used", False)),
                     "X-Session-ID": session_id,
                     "X-Language": headers.language or "python",  # Return detected language
-                    "X-Task-Type": workflow_state.get("detected_task_type", "general") if workflow_state else "general"
+                    "X-Task-Type": workflow_state.get("detected_task_type", "general") if workflow_state else "general",
+                    "X-Artifacts-Used": "true"  # Indicate artifacts were processed
                 }
             )
         else:
@@ -479,6 +498,28 @@ async def get_session_messages(project_name: str, user_id: str, session_id: str)
     return {"error": "Context manager not initialized"}
 
 
+@app.post("/test-artifacts")
+async def test_artifacts(content: str):
+    """Test endpoint to see how content would be processed for artifacts"""
+    global artifact_handler
+
+    cleaned_content, artifacts = artifact_handler.process_message_for_artifacts(content)
+
+    return {
+        "original_length": len(content),
+        "cleaned_content": cleaned_content,
+        "cleaned_length": len(cleaned_content),
+        "artifacts_count": len(artifacts),
+        "artifacts": [
+            {
+                "size": len(artifact["text"]),
+                "preview": artifact["text"][:200] + "..." if len(artifact["text"]) > 200 else artifact["text"]
+            }
+            for artifact in artifacts
+        ]
+    }
+
+
 @app.get("/")
 async def root():
     return {
@@ -490,10 +531,12 @@ async def root():
             "Streaming responses",
             "Context-aware responses",
             "Project-based knowledge",
-            "Session-based conversations",  # Added session feature
+            "Session-based conversations",
             "Vector similarity search",
             "Message starring",
-            "LangGraph workflows"
+            "LangGraph workflows",
+            "Automatic artifact processing",  # Added artifact feature
+            "Code-aware metadata collection"
         ]
     }
 
